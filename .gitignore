@@ -1,0 +1,21 @@
+# Secrets — NEVER commit real API keys
+.env
+
+# Local vector DBs and scraped data (rebuildable)
+chroma_db/
+chroma_verified/
+
+# Feedback logs (contains user conversations)
+data/feedback.jsonl
+
+# Temp audio
+*.mp3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
