@@ -1,6 +1,10 @@
-"""UAE Labour Law AI v2.1 — graphical GUI • auto language detection • live voice chat.
+"""UAE Labour Law AI v2.2 — GUI • auto language detection • live voice chat.
 
-Run:  streamlit run app.py
+Fixes in v2.2:
+  - Gemini model fallback chain (flash-latest -> 2.0-flash -> 1.5-flash).
+  - Forced dark theme (see .streamlit/config.toml) + explicit widget text colors
+    so typed text and the language selector are visible everywhere.
+  - Clearer API error messages (key missing / invalid / quota).
 """
 import base64
 import os
@@ -59,7 +63,7 @@ def detect_lang(text: str, fallback: str = "en") -> str:
         return fallback
 
 
-# ---------------- Animated graphical UI ----------------
+# ---------------- UI ----------------
 st.set_page_config(page_title="UAE Labour Law AI ⚖️", page_icon="⚖️", layout="wide")
 
 st.markdown("""
@@ -70,7 +74,7 @@ st.markdown("""
 @keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 @keyframes pulseGlow{0%,100%{box-shadow:0 0 20px rgba(16,163,127,.35)}50%{box-shadow:0 0 45px rgba(16,163,127,.75)}}
 @keyframes shimmer{0%{left:-500px}100%{left:120%}}
-.stApp{background:#070b12; color:#e7ecf3; font-family:'Inter','Noto Sans Sinhala','Noto Sans Arabic','Noto Sans Tamil',sans-serif; overflow-x:hidden;}
+.stApp{background:#070b12; color:#e7ecf3 !important; font-family:'Inter','Noto Sans Sinhala','Noto Sans Arabic','Noto Sans Tamil',sans-serif; overflow-x:hidden;}
 .stApp::before{content:''; position:fixed; inset:-20%; z-index:-1;
   background:radial-gradient(45% 45% at 30% 30%, rgba(16,163,127,.22) 0%, transparent 60%),
              radial-gradient(40% 40% at 75% 25%, rgba(212,175,55,.16) 0%, transparent 60%),
@@ -112,14 +116,26 @@ div[data-testid="stChatMessage"]{background:linear-gradient(145deg, rgba(255,255
   box-shadow:0 10px 26px rgba(0,0,0,.35); animation:rise .35s ease;}
 @keyframes rise{from{opacity:0; transform:translateY(10px)} to{opacity:1}}
 div[data-testid="stChatMessage"] p{color:#e7ecf3 !important;}
-.stButton>button{background:linear-gradient(135deg,#10a37f,#0d8a6d); color:#fff; border:none; border-radius:14px;
+.stButton>button{background:linear-gradient(135deg,#10a37f,#0d8a6d); color:#fff !important; border:none; border-radius:14px;
   font-weight:700; box-shadow:0 6px 18px rgba(16,163,127,.45); transition:all .25s;}
-.stButton>button:hover{transform:translateY(-2px) scale(1.02);}
+.stButton>button:hover{transform:translateY(-2px) scale(1.02); color:#fff !important;}
 .stChatInput{border-radius:16px !important; border:1px solid rgba(255,255,255,.2) !important;}
-.stSelectbox>div>div{background:rgba(255,255,255,.08) !important; border:1px solid rgba(255,255,255,.18) !important; border-radius:12px !important;}
+/* ---- v2.2 FIX: make all typed text + widget text clearly visible on dark UI ---- */
+.stChatInput textarea, div[data-testid="stChatInput"] textarea{color:#ffffff !important; background-color:#101726 !important;}
+.stTextInput input, .stTextArea textarea{color:#ffffff !important; background-color:#101726 !important;}
+.stNumberInput input{color:#ffffff !important; background-color:#101726 !important;}
+.stSelectbox>div>div{background:#101726 !important; border:1px solid rgba(255,255,255,.25) !important; border-radius:12px !important;}
+.stSelectbox span, .stRadio label, .stRadio label p{color:#e7ecf3 !important;}
+.stRadio div[role="radiogroup"] label{color:#e7ecf3 !important;}
+.stRadio label:hover{color:#7ef0c5 !important;}
+.stMetric{background:rgba(255,255,255,.05); border-radius:14px; padding:8px 12px;}
+.stExpander{background:rgba(255,255,255,.04); border-radius:16px;}
 .src-note{color:#9aa7ba; font-size:12px; border-inline-start:3px solid #d4af37; padding-inline-start:10px; margin-top:6px;}
 .detected-pill{background:rgba(16,163,127,.15); border:1px solid rgba(16,163,127,.5); color:#7ef0c5;
   padding:3px 12px; border-radius:999px; font-size:11px; display:inline-block; margin-bottom:8px;}
+.stDownloadButton>button{color:#ffffff !important;}
+h1, h2, h3, h4, h5, h6, p, span, label, li{color:#e7ecf3;}
+.stAlert, .stWarning, .stError, .stSuccess, .stInfo{color:#0b0f17;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -172,7 +188,7 @@ def load_db(path):
 db = load_db("chroma_db")
 verified_db = load_db("chroma_verified")
 if db is None:
-    st.warning("⚠️ Knowledge base not built yet. Terminal: `python scraper.py` → `python ingest.py`")
+    st.info("ℹ️ Knowledge base not built yet — answers use Gemini's general knowledge. Run `python scraper.py` → `python ingest.py` locally and upload chroma_db for 100% grounded answers.")
 
 # ---------------- Voice helpers ----------------
 try:
@@ -213,6 +229,20 @@ def play_audio(b):
 
 
 # ---------------- RAG engine ----------------
+GENAI_MODELS = ["gemini-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+
+def gemini_generate(prompt: str) -> str:
+    """Try each model alias until one works — fixes 'model not found' errors."""
+    last_err = None
+    for model in GENAI_MODELS:
+        try:
+            return client.models.generate_content(model=model, contents=prompt).text
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+
 def ask(query: str, lang_key: str):
     """RAG: verified memory + law DB -> Gemini -> (answer, context)."""
     L = LANGS[lang_key]
@@ -231,23 +261,39 @@ def ask(query: str, lang_key: str):
             pass
     for r in (learn.best_verified(query) or []):
         parts.append(f"[VERIFIED MEMORY]\nQ: {r['question']}\nA: {r['answer']}")
-    context = "\n\n---\n\n".join(parts) or "(no context found)"
+    context = "\n\n---\n\n".join(parts)
+    grounded = bool(parts)
 
-    prompt = f"""You are an expert UAE Labour Lawyer. Answer ONLY using the context below. If the answer is not in the context, say "I am sorry, I cannot provide an answer based on the official laws." Do not hallucinate. Do not invent article numbers.
+    if grounded:
+        context_rule = ('Answer ONLY using the context below. If the answer is not in the context, '
+                        'say "I am sorry, I cannot provide an answer based on the official laws." '
+                        'Do not hallucinate. Do not invent article numbers.')
+    else:
+        context_rule = ('Answer from your general knowledge of UAE Federal Decree-Law No. 33/2021 '
+                        'as amended. If unsure, say so. Never invent article numbers.')
+
+    prompt = f"""You are an expert UAE Labour Lawyer. {context_rule}
 CRITICAL LANGUAGE RULE: Reply fully in: {L['out']}. Even if the question is in Singlish or another language, the final answer must be in the user's language's natural script.
 Keep it concise (under 180 words). Cite articles inside the answer when available.
-CONTEXT:\n{context}\n\nQUESTION: {query}"""
+{('CONTEXT:\n' + context) if grounded else ''}
+QUESTION: {query}"""
 
     try:
-        answer = client.models.generate_content(model="gemini-flash-latest", contents=prompt).text
+        answer = gemini_generate(prompt)
     except Exception as e:
-        st.error(f"⚠️ Gemini API error: {e}")
+        msg = str(e)
+        if "API key" in msg or "401" in msg or "permission" in msg.lower():
+            st.error("🔑 Gemini API key problem: the key is missing, revoked, or invalid. "
+                     "Check the app's Secrets (GEMINI_API_KEY) in Streamlit Cloud → Settings → Secrets.")
+        elif "429" in msg or "quota" in msg.lower():
+            st.error("⏳ Gemini free quota exceeded — wait a minute and try again.")
+        else:
+            st.error(f"⚠️ Gemini API error: {msg[:300]}")
         return None, ""
     return answer, context
 
 
 def answer_and_show(query, lang_key, speak=True, fkey=""):
-    """Show answer + sources + TTS + feedback buttons. Returns (answer, context)."""
     with st.spinner("🧠 Searching official law database + verified memory…"):
         ans, ctx = ask(query, lang_key)
     if ans is None:
@@ -268,7 +314,6 @@ def answer_and_show(query, lang_key, speak=True, fkey=""):
             st.info("📉 Logged — we'll steer away from this pattern.")
     return ans, ctx
 
-
 # ---------------- Tabs ----------------
 tab_chat, tab_tools = st.tabs(["💬 Chat", "🧰 Tools"])
 
@@ -280,6 +325,8 @@ with tab_chat:
           <p style='text-align:center;color:#ffb3b5;margin:0;font-size:13px;'>Speak in <b>any language</b> — bot replies <b>in your language</b>, out loud. Say <b>stop</b> to end.</p>
         </div>
         """, unsafe_allow_html=True)
+        if not MIC_OK:
+            st.caption("🎙️ Voice features unavailable (streamlit-mic-recorder missing). Text chat still works.")
         live_on = st.toggle("🎤 Start live conversation", key="live_toggle")
         if live_on and MIC_OK:
             rounds, stop = 0, False
@@ -305,8 +352,6 @@ with tab_chat:
                     rounds += 1
             if not stop and rounds >= 8:
                 st.caption("Max rounds — restart to continue.")
-        elif live_on and not MIC_OK:
-            st.error("streamlit-mic-recorder not installed — pip install streamlit-mic-recorder")
 
     voice_text = None
     if MIC_OK:
