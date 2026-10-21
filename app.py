@@ -1,10 +1,10 @@
-"""UAE Labour Law AI v2.2 — GUI • auto language detection • live voice chat.
+"""UAE Labour Law AI v2.3 — GUI • auto language detection • live voice chat.
 
-Fixes in v2.2:
-  - Gemini model fallback chain (flash-latest -> 2.0-flash -> 1.5-flash).
-  - Forced dark theme (see .streamlit/config.toml) + explicit widget text colors
-    so typed text and the language selector are visible everywhere.
-  - Clearer API error messages (key missing / invalid / quota).
+Fixes in v2.3:
+  - Dynamic Gemini model discovery: queries the API's model list and picks an
+    available flash model — fixes 404 'model not found' for hardcoded aliases.
+  - Much more robust Singlish detection (bigger wordlist + low-confidence
+    langdetect override) — fixes wrong-language answers (e.g. Tagalog).
 """
 import base64
 import os
@@ -39,28 +39,55 @@ LANGS = {
 }
 LANG_ORDER = ["si", "ta", "hi", "kn", "ml", "ur", "ar", "bn", "ne", "tl", "en"]
 
-SINGLISH_WORDS = (
-    "mama", "oyaa", "oyage", "mata", "machan", "mchan", "kawda", "kawada", "karan",
-    "kala", "one", "epa", "puluvan", "puluvanne", "denna", "kiyanna", "thama",
-    "thamai", "nathi", "nisa", "witharai", "hari", "honda", "numba", "api", "eheme",
-    "meke", "meeka", "eka", "deka", "wenna", "wenawa", "tiyenna", "anna",
-    "kohomada", "koheda", "mokakda", "meka", "eyaa", "eyage", "apa", "salara",
-)
+# v2.3: much bigger Singlish wordlist (romanized Sinhala markers)
+SINGLISH_STRONG = {
+    "mama", "mata", "machan", "mchan", "machanla", "oyaa", "oyata", "oyage",
+    "numba", "api", "ape", "apage", "kohomada", "koheda", "mokakda", "mokada",
+    "puluvan", "puluvanda", "puluvanne", "puluvannam", "epa", "anna", "thamai",
+    "thama", "kawda", "kawada", "honda", "hondama", "hari", "harima", "one",
+    "onna", "karan", "karanawa", "kala", "karala", "karanna", "karannaone",
+    "wenawa", "wenna", "wenne", "thiyenawa", "thibba", "tiyenna", "tiyenne",
+    "denna", "danne", "kiyanna", "kiyala", "kiyannako", "ganna", "gannawa",
+    "gannakama", "kapanna", "kapannaone", "viyadam", "viyadamuna", "mudala",
+    "padiyen", "padiyata", "ekata", "eka", "deka", "una", "nam", "namme",
+    "witharai", "witharak", "nathi", "nisa", "nisaone", "eyaa", "eyage",
+    "meke", "meeka", "meekata", "meka", "salara", "salarayata", "ayeth",
+    "ita", "pasakal", "himan", "labenna", "labba", "labboda", "labbewanam",
+    "kalin", "dan", "danpat", "hambakaranna", "hamba", "hambawela",
+    "wage", "wagema", "men", "semaye", "samaye",
+}
+
+# romanized-Sinhala verb ending patterns (weaker evidence)
+SINGLISH_ENDINGS = ("anna", "anawa", "enne", "enawa", "ila", "uwa", "welaa", "wela", "eda", "akuda")
 
 
 def detect_lang(text: str, fallback: str = "en") -> str:
-    """Detect the question's language. Singlish -> Sinhala."""
+    """Detect the question's language. Singlish -> Sinhala (robust v2.3)."""
     t = re.sub(r"[^\w\s]", " ", text.lower())
     words = set(t.split())
-    if len(words & set(SINGLISH_WORDS)) >= 2:
+    strong = words & SINGLISH_STRONG
+    weak = sum(1 for w in words if any(w.endswith(e) for e in SINGLISH_ENDINGS))
+
+    if len(strong) >= 2 or (len(strong) >= 1 and weak >= 2):
         return "si"
+
     try:
-        from langdetect import detect, DetectorFactory
+        from langdetect import detect_langs, DetectorFactory
         DetectorFactory.seed = 0
-        code = detect(text)
-        return code if code in LANGS else fallback
+        probs = detect_langs(text)
+        top = probs[0]
+        code = top.lang
+        # romanized text often misfires to these languages -> trust Singlish evidence first
+        if code in ("tl", "id", "ms", "sw", "so", "vi", "jv", "su") and (strong or weak >= 1):
+            return "si"
+        if code in LANGS:
+            # low confidence + any Singlish hint -> Sinhala
+            if top.prob < 0.55 and (strong or weak >= 2):
+                return "si"
+            return code
+        return fallback if not strong else "si"
     except Exception:
-        return fallback
+        return "si" if strong else fallback
 
 
 # ---------------- UI ----------------
@@ -120,7 +147,6 @@ div[data-testid="stChatMessage"] p{color:#e7ecf3 !important;}
   font-weight:700; box-shadow:0 6px 18px rgba(16,163,127,.45); transition:all .25s;}
 .stButton>button:hover{transform:translateY(-2px) scale(1.02); color:#fff !important;}
 .stChatInput{border-radius:16px !important; border:1px solid rgba(255,255,255,.2) !important;}
-/* ---- v2.2 FIX: make all typed text + widget text clearly visible on dark UI ---- */
 .stChatInput textarea, div[data-testid="stChatInput"] textarea{color:#ffffff !important; background-color:#101726 !important;}
 .stTextInput input, .stTextArea textarea{color:#ffffff !important; background-color:#101726 !important;}
 .stNumberInput input{color:#ffffff !important; background-color:#101726 !important;}
@@ -228,14 +254,32 @@ def play_audio(b):
         st.markdown(f"<audio controls autoplay src='data:audio/mp3;base64,{b64}' type='audio/mpeg' style='width:100%;margin-top:8px;'></audio>", unsafe_allow_html=True)
 
 
-# ---------------- RAG engine ----------------
-GENAI_MODELS = ["gemini-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash"]
+# ---------------- RAG engine (v2.3: dynamic model discovery) ----------------
+STATIC_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+
+@st.cache_resource
+def discover_models():
+    """Ask the API which models actually exist for this key (fixes 404s)."""
+    found = []
+    try:
+        for m in client.models.list():
+            name = getattr(m, "name", "") or ""
+            actions = getattr(m, "supported_actions", None) or []
+            if "generateContent" in actions and "flash" in name and "embedding" not in name:
+                found.append(name)
+    except Exception:
+        pass
+    return found
 
 
 def gemini_generate(prompt: str) -> str:
-    """Try each model alias until one works — fixes 'model not found' errors."""
     last_err = None
-    for model in GENAI_MODELS:
+    tried = set()
+    for model in STATIC_MODELS + [m for m in discover_models() if m not in STATIC_MODELS]:
+        if model in tried:
+            continue
+        tried.add(model)
         try:
             return client.models.generate_content(model=model, contents=prompt).text
         except Exception as e:
@@ -287,6 +331,10 @@ QUESTION: {query}"""
                      "Check the app's Secrets (GEMINI_API_KEY) in Streamlit Cloud → Settings → Secrets.")
         elif "429" in msg or "quota" in msg.lower():
             st.error("⏳ Gemini free quota exceeded — wait a minute and try again.")
+        elif "404" in msg:
+            st.error("🔎 No Gemini model is available for this API key. The key may be from an "
+                     "unsupported project/key-type — create a new key at aistudio.google.com/apikey "
+                     "(Gemini API key, not an OAuth key) and update Secrets.")
         else:
             st.error(f"⚠️ Gemini API error: {msg[:300]}")
         return None, ""
